@@ -31,3 +31,25 @@ ManagerBuffer 接口实现以下方法：
     如果返回的是ByteBuf，相应的MessageBuffer的引用计数+1，由caller 需要去处理释放的过程
     
     ```public abstract Object convertToNetty() throws IOException;```
+
+
+### FileSegmentManagedBuffer
+表示一个文件的文件片段，内部变量存储文件的起始位position和要读取的文件长度。
+在`createInputStream()`方法中，会生成length长度的LimitedInputStream。
+在生成NIO传输对象`nioByteBuffer()`时，当length的长度小与设置的允许内存map的大小时，
+调用`ByteBuffer.allocate()`方法，申请指定长度的DirectMemory 内存，直接copy文件的字节流，
+读取对一个length长度的文件字节流。 当length的长度大于允许设置的内存map大小的size时，
+直接使用memory mapping去复制对应的数据。 
+
+当length长度较小的时候不是哟过memory mapping的原因是，memory mapping的开销时比较大的，给比较小的数据块就去做
+memory mapping， 额外的overhead 过大，不划算， 所以设置一个范围，不与许对值小于 `spark.storage.memoryMapThreshold` 
+设置的值的数据做memory mappig。
+**后续需要了解memory mapping**
+
+### 
+
+
+
+
+
+
