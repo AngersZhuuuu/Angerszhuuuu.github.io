@@ -19,3 +19,202 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
  * private volatile boolean timedOut;  客户端请求超时时间
  
  
+客户端的请求对应[network 消息类型](spark-network-message.html) 中所讲的集中类型的消息，在客户端中
+分别由以下类型的请求：
+
+#### fetchChunk()
+```
+ /**
+   * 格局提前沟通的streamId向远端获取一个块的数据
+   * Requests a single chunk from the remote side, from the pre-negotiated streamId.
+   *
+   * 块的索引从0线上增加，可以多次获取同一个块，但是有的远端的数据流可能不支持。
+   * Chunk indices go from 0 onwards. It is valid to request the same chunk multiple times, though
+   * some streams may not support this.
+   *
+   * 假设一个远端的数据流stream只被一个TransportClient请求获取数据的时候，
+   * 申请块的请求可能是同时都没有完成，返回的数据块的顺序是保证按照请求的顺序。
+   * 这也对应了前面说的，一个stream 严格对应一个客户端。
+   * Multiple fetchChunk requests may be outstanding simultaneously, and the chunks are guaranteed
+   * to be returned in the same order that they were requested, assuming only a single
+   * TransportClient is used to fetch the chunks.
+   *
+   * @param streamId 指向远端的StreamManager的标志符，这是在处理数据块钱服务端和客户端协商好的标志符.
+   * @param chunkIndex 从0开始的数据块的索引
+   * @param callback 处理fetch块失败or成功的监听回调函数.
+   */
+  public void fetchChunk(
+      long streamId,
+      int chunkIndex,
+      ChunkReceivedCallback callback) {
+    if (logger.isDebugEnabled()) {
+      logger.debug("Sending fetch chunk request {} to {}", chunkIndex, getRemoteAddress(channel));
+    }
+
+    StreamChunkId streamChunkId = new StreamChunkId(streamId, chunkIndex);
+    StdChannelListener listener = new StdChannelListener(streamChunkId) {
+      @Override
+      void handleFailure(String errorMsg, Throwable cause) {
+        handler.removeFetchRequest(streamChunkId);
+        callback.onFailure(chunkIndex, new IOException(errorMsg, cause));
+      }
+    };
+    // 将请求添加几responds handle，针对respond进行处理
+    handler.addFetchRequest(streamChunkId, callback);
+
+    // 写入链接套接字，远端的server 端对请求进行处理，返回将会被responds handler处理
+    channel.writeAndFlush(new ChunkFetchRequest(streamChunkId)).addListener(listener);
+  }
+```
+
+### stream()
+
+```
+  /**
+   * 向远端请求数据流
+   * Request to stream the data with the given stream ID from the remote end.
+   *
+   * @param streamId The stream to fetch.
+   * @param callback Object to call with the stream data.
+   */
+  public void stream(String streamId, StreamCallback callback) {
+    StdChannelListener listener = new StdChannelListener(streamId) {
+      @Override
+      void handleFailure(String errorMsg, Throwable cause) throws Exception {
+        callback.onFailure(streamId, new IOException(errorMsg, cause));
+      }
+    };
+    if (logger.isDebugEnabled()) {
+      logger.debug("Sending stream request for {} to {}", streamId, getRemoteAddress(channel));
+    }
+
+    // Need to synchronize here so that the callback is added to the queue and the RPC is
+    // written to the socket atomically, so that callbacks are called in the right order
+    // when responses arrive.
+    synchronized (this) {
+      handler.addStreamCallback(streamId, callback);
+      channel.writeAndFlush(new StreamRequest(streamId)).addListener(listener);
+    }
+  }
+```
+
+### sendRpc()
+```
+ /**
+   * 向远端的RpcHandler 发送一个不透明的rpc消息，回调方法处理成功or失败。
+   * Sends an opaque message to the RpcHandler on the server-side. The callback will be invoked
+   * with the server's response or upon any failure.
+   *
+   * @param message 传递的消息，NIO的ByteBuffer.
+   * @param callback 处理RPC回应的回调函数
+   * @return The RPC's id.
+   */
+  public long sendRpc(ByteBuffer message, RpcResponseCallback callback) {
+    if (logger.isTraceEnabled()) {
+      logger.trace("Sending RPC to {}", getRemoteAddress(channel));
+    }
+
+    long requestId = requestId();
+    // 添加回调方法到responds handler中去
+    handler.addRpcRequest(requestId, callback);
+
+    RpcChannelListener listener = new RpcChannelListener(requestId, callback);
+    channel.writeAndFlush(new RpcRequest(requestId, new NioManagedBuffer(message)))
+      .addListener(listener);
+
+    return requestId;
+  }
+```
+
+
+### uploadStream()
+```
+/**
+   * 给远端的数据流传输数据，和前面的 stream()不同的是这个是传输数据，不是去从远端接收数据
+   * Send data to the remote end as a stream.  This differs from stream() in that this is a request
+   * to *send* data to the remote end, not to receive it from the remote.
+   *
+   * @param meta meta data associated with the stream, which will be read completely on the
+   *             receiving end before the stream itself.
+   * @param data this will be streamed to the remote end to allow for transferring large amounts
+   *             of data without reading into memory.
+   * @param callback handles the reply -- onSuccess will only be called when both message and data
+   *                 are received successfully.
+   */
+  public long uploadStream(
+      ManagedBuffer meta,
+      ManagedBuffer data,
+      RpcResponseCallback callback) {
+    if (logger.isTraceEnabled()) {
+      logger.trace("Sending RPC to {}", getRemoteAddress(channel));
+    }
+
+    long requestId = requestId();
+    handler.addRpcRequest(requestId, callback);
+
+    RpcChannelListener listener = new RpcChannelListener(requestId, callback);
+    channel.writeAndFlush(new UploadStream(requestId, meta, data)).addListener(listener);
+
+    return requestId;
+  }
+```
+ 
+### sendRpcSync()
+
+同步的方式发送RPC请求， 需要在一个指定的时间内获得返回结果。
+```
+/**
+   * Synchronously sends an opaque message to the RpcHandler on the server-side, waiting for up to
+   * a specified timeout for a response.
+   */
+  public ByteBuffer sendRpcSync(ByteBuffer message, long timeoutMs) {
+    final SettableFuture<ByteBuffer> result = SettableFuture.create();
+
+    sendRpc(message, new RpcResponseCallback() {
+      @Override
+      public void onSuccess(ByteBuffer response) {
+        try {
+          ByteBuffer copy = ByteBuffer.allocate(response.remaining());
+          copy.put(response);
+          // flip "copy" to make it readable
+          copy.flip();
+          result.set(copy);
+        } catch (Throwable t) {
+          logger.warn("Error in responding PRC callback", t);
+          result.setException(t);
+        }
+      }
+
+      @Override
+      public void onFailure(Throwable e) {
+        result.setException(e);
+      }
+    });
+
+    try {
+      return result.get(timeoutMs, TimeUnit.MILLISECONDS);
+    } catch (ExecutionException e) {
+      throw Throwables.propagate(e.getCause());
+    } catch (Exception e) {
+      throw Throwables.propagate(e);
+    }
+  }
+``` 
+ 
+### send()
+
+```
+  /**
+   * 向远端的RpcHandler发送RPC请求，但是不需要返回，所以方法中不需要等待返回和添加监听器和回调函数
+   * Sends an opaque message to the RpcHandler on the server-side. No reply is expected for the
+   * message, and no delivery guarantees are made.
+   *
+   * @param message The message to send.
+   */
+  public void send(ByteBuffer message) {
+    channel.writeAndFlush(new OneWayMessage(new NioManagedBuffer(message)));
+  }
+
+```
+
+ 
