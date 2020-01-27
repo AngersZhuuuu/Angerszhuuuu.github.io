@@ -217,4 +217,136 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
 
 ```
 
+
+### TransportResponseHandler
+TransportResponseHandler 是TransportClient 客户端处理响应消息的类， 其构造函数较为简单，需要的参数是对应链接的Channel的网络套接字。
+其中有如下几个比较重要的对象：
+
+ - outstandingFetches：ConcurrentHashMap of client `fetchChunk()` 时的StreamChunkId 和 对应的回调函数
+ - outstandingRpcs：ConcurrentHashMap of client `sendRpc()` 时的 RpcId 和 对应的回调函数
+ - streamCallbacks：Queue of client `stream()` 时的StreamId 和 对应的回调函数
+ - timeOfLastRequestNs: 记录handle 上一次的请求时间
+
+查看前面的TransportClient的API 可以发现，其在做异步请求的时候，会将对应的请求id 和 回调函数添加进 respond  handler的
+存储对象中去，当处理（`TransportResponseHandler.handle()`）结束chunk rpc stream 三种请求方式分别对应下面6个api：
+
+ - addFetchRequest()
+ - removeFetchRequest()
+ - addRpcRequest()
+ - removeRpcRequest()
+ - addStreamCallback()
+ - deactivateStream()
  
+ 在`TransportResponseHandler`类中，处理各个异步请求的回调在其方法`handle()`中：
+ 
+```
+  @Override
+  public void handle(ResponseMessage message) throws Exception {
+  // 返回的是成功的message时，调用回调的onSuccess(), 失败时调用 onFailure()
+    if (message instanceof ChunkFetchSuccess) {
+      ChunkFetchSuccess resp = (ChunkFetchSuccess) message;
+      ChunkReceivedCallback listener = outstandingFetches.get(resp.streamChunkId);
+      if (listener == null) {
+        // listener 为空， 没有回调， 直接将body（MessageBuffer）释放
+        logger.warn("Ignoring response for block {} from {} since it is not outstanding",
+          resp.streamChunkId, getRemoteAddress(channel));
+        resp.body().release();
+      } else {
+        // 当有设置回调函数的时候，调用对应的回调函数，冰将MessageBuffer释放
+        outstandingFetches.remove(resp.streamChunkId);
+        listener.onSuccess(resp.streamChunkId.chunkIndex, resp.body());
+        resp.body().release();
+      }
+    } else if (message instanceof ChunkFetchFailure) {
+      ChunkFetchFailure resp = (ChunkFetchFailure) message;
+      ChunkReceivedCallback listener = outstandingFetches.get(resp.streamChunkId);
+      if (listener == null) {
+        logger.warn("Ignoring response for block {} from {} ({}) since it is not outstanding",
+          resp.streamChunkId, getRemoteAddress(channel), resp.errorString);
+      } else {
+        outstandingFetches.remove(resp.streamChunkId);
+        listener.onFailure(resp.streamChunkId.chunkIndex, new ChunkFetchFailureException(
+          "Failure while fetching " + resp.streamChunkId + ": " + resp.errorString));
+      }
+    } else if (message instanceof RpcResponse) {
+    // RPC使用的时NIO格式信息数据
+      RpcResponse resp = (RpcResponse) message;
+      RpcResponseCallback listener = outstandingRpcs.get(resp.requestId);
+      if (listener == null) {
+        logger.warn("Ignoring response for RPC {} from {} ({} bytes) since it is not outstanding",
+          resp.requestId, getRemoteAddress(channel), resp.body().size());
+      } else {
+        outstandingRpcs.remove(resp.requestId);
+        // 因为rpc请求可能会继续作出别的请求，在这里 try finally包住，释放数据
+        try {
+          listener.onSuccess(resp.body().nioByteBuffer());
+        } finally {
+          resp.body().release();
+        }
+      }
+    } else if (message instanceof RpcFailure) {
+      RpcFailure resp = (RpcFailure) message;
+      RpcResponseCallback listener = outstandingRpcs.get(resp.requestId);
+      if (listener == null) {
+        logger.warn("Ignoring response for RPC {} from {} ({}) since it is not outstanding",
+          resp.requestId, getRemoteAddress(channel), resp.errorString);
+      } else {
+        outstandingRpcs.remove(resp.requestId);
+        listener.onFailure(new RuntimeException(resp.errorString));
+      }
+    } else if (message instanceof StreamResponse) {
+    // stream 的方法略为不同，其需要使用TransportFrameDecoder去处理
+      StreamResponse resp = (StreamResponse) message;
+      Pair<String, StreamCallback> entry = streamCallbacks.poll();
+      if (entry != null) {
+        StreamCallback callback = entry.getValue();
+        if (resp.byteCount > 0) {
+          StreamInterceptor<ResponseMessage> interceptor = new StreamInterceptor<>(
+            this, resp.streamId, resp.byteCount, callback);
+          try {
+            TransportFrameDecoder frameDecoder = (TransportFrameDecoder)
+              channel.pipeline().get(TransportFrameDecoder.HANDLER_NAME);
+            frameDecoder.setInterceptor(interceptor);
+            streamActive = true;
+          } catch (Exception e) {
+            logger.error("Error installing stream handler.", e);
+            deactivateStream();
+          }
+        } else {
+          try {
+            callback.onComplete(resp.streamId);
+          } catch (Exception e) {
+            logger.warn("Error in stream handler onComplete().", e);
+          }
+        }
+      } else {
+        logger.error("Could not find callback for StreamResponse.");
+      }
+    } else if (message instanceof StreamFailure) {
+      StreamFailure resp = (StreamFailure) message;
+      Pair<String, StreamCallback> entry = streamCallbacks.poll();
+      if (entry != null) {
+        StreamCallback callback = entry.getValue();
+        try {
+          callback.onFailure(resp.streamId, new RuntimeException(resp.error));
+        } catch (IOException ioe) {
+          logger.warn("Error in stream failure handler.", ioe);
+        }
+      } else {
+        logger.warn("Stream failure with unknown callback: {}", resp.error);
+      }
+    } else {
+      throw new IllegalStateException("Unknown response type: " + message.type());
+    }
+  }
+
+```
+
+
+其中需要注意的点是
+
+ - RpcResponseCallback 如果你需要在回调函数外去使用对应的message中的数据，
+ 因为在调用完回调函数，对应的数据被release， 需要copy一份数据
+ - ChunkResponseCallback 如果想在回调函数外使用数据，需要call MnanagerBuffer的 retain方法
+ 
+ 上述的差异是因为，两个回调类的回调方法的参数不一样导致的 rpc 回调使用的参数是ByteBuffer，是直接的数据，chunk 使用的是ManagerBuffer
