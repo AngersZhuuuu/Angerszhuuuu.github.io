@@ -10,7 +10,7 @@ TransportContext 是Spark 网络通信模块重要的类，具体介绍其中的
 `TransportServer` 和 `TransportClientFactory` 都会为每一个通讯channel创建 `TransportChannelHandler`。
 每一个`TransportChannelHandler`包含一个`TransportClient`,使服务端也可以向已存在的客户端发送消息。
 
-[Client Server 消息传递](channel.png)
+![Client Server 消息传递](channel.png)
 
 
 ## initializePipeline
