@@ -1,6 +1,6 @@
-# spark-network 的消息发送和接收处理框架
+# spark-network client端的消息发送和接收处理框架
 
-## 发送
+## 客户端发送
 在Spark的network 框架中，消息的发送由 `TransportClient` 类完成，客户端的TransportClient是由
 `TransportClientFactory` 根据接收的host 和 port 生成对应的Socket链接，返回TransportClient
 
