@@ -75,3 +75,80 @@ public TransportChannelHandler initializePipeline(
 
 ### createChunkFetchHandler()
 为ChunkFetchRequest消息创建专用的ChannelHandler。
+
+## TransportChannelHandler
+
+TransportChannelHandler 负责处理channel中接收到的消息， 主要有三个功能
+
+ 1. 将request和respond分发给RTransportRequestHandler或者TransportRespondHandler
+ 2. 重写acceptInboundMessage将ChunkFetchRequest抛给更上层的handler `ChunkFetchRequestHandler`
+
+### 分发处理request和respond类型消息
+
+```java
+  @Override
+  public void channelRead0(ChannelHandlerContext ctx, Message request) throws Exception {
+    if (request instanceof RequestMessage) {
+      requestHandler.handle((RequestMessage) request);
+    } else if (request instanceof ResponseMessage) {
+      responseHandler.handle((ResponseMessage) request);
+    } else {
+      ctx.fireChannelRead(request);
+    }
+  }
+```
+
+### acceptInboundMessage() 抛出 ChunkFetchRequest
+```java
+  /**
+   * Overwrite acceptInboundMessage to properly delegate ChunkFetchRequest messages
+   * to ChunkFetchRequestHandler.
+   */
+  @Override
+  public boolean acceptInboundMessage(Object msg) throws Exception {
+    if (msg instanceof ChunkFetchRequest) {
+      return false;
+    } else {
+      return super.acceptInboundMessage(msg);
+    }
+  }
+```
+
+### userEventTriggered() 方法处理IdleStateHandler触发的超时事件
+```java
+/** Triggered based on events from an {@link io.netty.handler.timeout.IdleStateHandler}. */
+  @Override
+  public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+    if (evt instanceof IdleStateEvent) {
+      IdleStateEvent e = (IdleStateEvent) evt;
+      // See class comment for timeout semantics. In addition to ensuring we only timeout while
+      // there are outstanding requests, we also do a secondary consistency check to ensure
+      // there's no race between the idle timeout and incrementing the numOutstandingRequests
+      // (see SPARK-7003).
+      //
+      // To avoid a race between TransportClientFactory.createClient() and this code which could
+      // result in an inactive client being returned, this needs to run in a synchronized block.
+      synchronized (this) {
+        boolean hasInFlightRequests = responseHandler.numOutstandingRequests() > 0;
+        boolean isActuallyOverdue =
+          System.nanoTime() - responseHandler.getTimeOfLastRequestNs() > requestTimeoutNs;
+        if (e.state() == IdleState.ALL_IDLE && isActuallyOverdue) {
+          if (hasInFlightRequests) {
+            String address = getRemoteAddress(ctx.channel());
+            logger.error("Connection to {} has been quiet for {} ms while there are outstanding " +
+              "requests. Assuming connection is dead; please adjust spark.network.timeout if " +
+              "this is wrong.", address, requestTimeoutNs / 1000 / 1000);
+            client.timeOut();
+            ctx.close();
+          } else if (closeIdleConnections) {
+            // While CloseIdleConnections is enable, we also close idle connection
+            client.timeOut();
+            ctx.close();
+          }
+        }
+      }
+    }
+    ctx.fireUserEventTriggered(evt);
+  }
+
+```

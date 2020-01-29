@@ -81,3 +81,17 @@ RpcHandler appRpcHandler对象， 对channel 中的消息进行处理， 这里�
  6. 配置子通道也就是SocketChannel的选项
  7. 设置子通道也就是SocketChannel的处理器， 其内部是实际业务开发的"主战场"（此处不详述，后面的系列会进行深入分析）
  8. 绑定并侦听某个端口
+ 
+ 
+ ### TransportRequestHandler
+ 前面在TransportContext中有讲到，在TransportChannelHandler中，对于Reqeust类的请求会被转发到TransportRequestHandler
+ 处理，在TransportRequestHandler 中主要有以下几个对象：
+ 
+  1. Channel channel 当前Netty Channel关联的channel
+  2. TransportClient reverseClient 同一个请求信道可以向requester通信的client对象
+  3. RpcHandler rpcHandler 处理rpc请求的handler，为初始化TransportContext时的handler
+  4. StreamManager streamManager 处理StreamRequest的StreamManager
+  
+在TransportRequestHandler中，没有处理Chunk请求的方法，ChunkRequest由ChunkFetchRequestHandler处理
+
+#### 主要的method
