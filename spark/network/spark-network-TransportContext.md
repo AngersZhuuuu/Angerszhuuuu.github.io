@@ -32,7 +32,7 @@ BootStraps将同步执行，并且必须成功运行才能创建客户端。
 返回创建的TransportChannelHandler，其中包括一个可用于在此通道上通信的TransportClient。
 TransportClient直接与ChannelHandler关联，以确保同一通道的所有用户获得相同的TransportClient对象。
 
-```
+```java
 public TransportChannelHandler initializePipeline(
       SocketChannel channel,
       RpcHandler channelRpcHandler) {

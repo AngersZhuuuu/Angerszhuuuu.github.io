@@ -23,7 +23,7 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
 分别由以下类型的请求：
 
 #### fetchChunk()
-```
+```java
  /**
    * 格局提前沟通的streamId向远端获取一个块的数据
    * Requests a single chunk from the remote side, from the pre-negotiated streamId.
@@ -69,7 +69,7 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
 
 ### stream()
 
-```
+```java
   /**
    * 向远端请求数据流
    * Request to stream the data with the given stream ID from the remote end.
@@ -99,7 +99,7 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
 ```
 
 ### sendRpc()
-```
+```java
  /**
    * 向远端的RpcHandler 发送一个不透明的rpc消息，回调方法处理成功or失败。
    * Sends an opaque message to the RpcHandler on the server-side. The callback will be invoked
@@ -128,7 +128,7 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
 
 
 ### uploadStream()
-```
+```java
 /**
    * 给远端的数据流传输数据，和前面的 stream()不同的是这个是传输数据，不是去从远端接收数据
    * Send data to the remote end as a stream.  This differs from stream() in that this is a request
@@ -162,7 +162,7 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
 ### sendRpcSync()
 
 同步的方式发送RPC请求， 需要在一个指定的时间内获得返回结果。
-```
+```java
 /**
    * Synchronously sends an opaque message to the RpcHandler on the server-side, waiting for up to
    * a specified timeout for a response.
@@ -203,7 +203,7 @@ TransportClient 是一个获取预先协商的数据流中连续块的客户端�
  
 ### send()
 
-```
+```java
   /**
    * 向远端的RpcHandler发送RPC请求，但是不需要返回，所以方法中不需要等待返回和添加监听器和回调函数
    * Sends an opaque message to the RpcHandler on the server-side. No reply is expected for the
@@ -239,7 +239,7 @@ TransportResponseHandler 是TransportClient 客户端处理响应消息的类，
  
  在`TransportResponseHandler`类中，处理各个异步请求的回调在其方法`handle()`中：
  
-```
+```java
   @Override
   public void handle(ResponseMessage message) throws Exception {
   // 返回的是成功的message时，调用回调的onSuccess(), 失败时调用 onFailure()
