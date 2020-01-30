@@ -1,7 +1,7 @@
 
 # Spark RPC Frame 实现的方式
 在前的部分中，讲到Spark的network的底层基于Netty的信息传输框架，我们知道在Spark中，Executor， Driver 是通过
-各种个样的RPC message来保持通信的，接下来阐述怎噩梦实现RPC的小时传递和处理：
+各种个样的RPC message来保持通信的，接下来阐述怎么实现RPC在各个端之前的发送传递和处理：
 
 ## 消息的包装发送
 Spark 发送RPC调用`RpcEndpointRef.ask()/send()`等方法，在其继承类NettyRpcEndpointRef中我们可以看到

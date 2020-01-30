@@ -13,5 +13,5 @@
  * [spark-network server端消息发送和接收框架](spark/network/(004)spark-network-server-recv-send.html)
  * [spark network框架的RpcHandler的作用以及类别](spark/network/(005)spark-network-rpchandler.html)
  * [spark-rpc-framework 工作框架](spark/network/(006)spark-network-rpc-frame.html)
-  
+ * [spark external shuffle service框架实现](spark/network/(007)spark-network-external-shuffle.html)
  
