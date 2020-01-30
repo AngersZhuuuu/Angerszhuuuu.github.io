@@ -237,7 +237,10 @@ TransportResponseHandler 是TransportClient 客户端处理响应消息的类，
  - addStreamCallback()
  - deactivateStream()
  
- 在`TransportResponseHandler`类中，处理各个异步请求的回调在其方法`handle()`中：
+ 
+ 在[TransportContext 介绍]((002)spark-network-TransportContext.html)中的TransportChannelHandler部分有介绍过，
+TransportChannelHandle会将respond类message转由TransportRespondHandle处理，在`TransportResponseHandler`类中，
+处理各个异步请求的回调在其方法`handle()`中：
  
 ```java
   @Override
