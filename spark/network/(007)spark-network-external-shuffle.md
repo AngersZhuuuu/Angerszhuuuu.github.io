@@ -42,6 +42,7 @@ Service， 只要知道BlockId，和对应的Executor的host，就可以准确�
 
 ### BlockManager请求远程数据
 
+#### Driver端获取远程数据
 每个BlockManager存储的这些数据通过UploadBlock类型的RPC通知Driver端，这样Driver端能知道每个RDD对应的数据块的分布位置和BlockId
 需要做数据shuffle的时候，driver端的task中携带要被获取的数据Block信息，然后根据Block的信息，调用BlockManager的相关方法：
 
@@ -61,44 +62,57 @@ BlockManager.getRemoveBlcok() -> BlockManager.readDiskBlockFromSameHostExecutor(
 数据在remote
 BlockManager.getRemoveBlcok() -> BlockManager.fetchRemoteManagedBuffer() -> 
 -> BlockTransferService.fetchBlockSync() -> BlockStoreClient.fetchBlocks()
-ExternalShuffleService中的BlockStoreClient继承类为 ExternalBlockStoreClient, fetchBlocks()方法如下
+```
 
- @Override
-  public void fetchBlocks(
-      String host,
-      int port,
-      String execId,
-      String[] blockIds,
-      BlockFetchingListener listener,
-      DownloadFileManager downloadFileManager) {
-    checkInit();
-    logger.debug("External shuffle fetch from {}:{} (executor id {})", host, port, execId);
+在这个地方又一个区分点，在spark中由配置
+`spark.shuffle.service.enabled`, 当其为true时，使用External shuffle， 当其为false时，使用直接链接executor的transfer service
+
+NettyBlockTransferService 是继承ExternalStoreClient直接链接Executor获取数据的客户端，
+ExternalShuffleService为继承ExternalStoreClient的External Shuffle Service的客户端，
+上述两种BlockStoreClient获取数据的方法基本一致，下面以 NettyBlockTransferService 的实现方法为例，讲述获取数据的流程
+```scala
+   def fetchBlocks(
+      host: String,
+      port: Int,
+      execId: String,
+      blockIds: Array[String],
+      listener: BlockFetchingListener,
+      tempFileManager: DownloadFileManager): Unit = {
+    logTrace(s"Fetch blocks from $host:$port (executor id $execId)")
     try {
-      RetryingBlockFetcher.BlockFetchStarter blockFetchStarter =
-          (blockIds1, listener1) -> {
-            // Unless this client is closed.
-            if (clientFactory != null) {
-              TransportClient client = clientFactory.createClient(host, port);
-              new OneForOneBlockFetcher(client, appId, execId,
-                blockIds1, listener1, conf, downloadFileManager).start();
-            } else {
-              logger.info("This clientFactory was closed. Skipping further block fetch retries.");
-            }
-          };
+      val blockFetchStarter = new RetryingBlockFetcher.BlockFetchStarter {
+        override def createAndStart(blockIds: Array[String],
+            listener: BlockFetchingListener): Unit = {
+          try {
+            val client = clientFactory.createClient(host, port)
+            new OneForOneBlockFetcher(client, appId, execId, blockIds, listener,
+              transportConf, tempFileManager).start()
+          } catch {
+            case e: IOException =>
+              Try {
+                driverEndPointRef.askSync[Boolean](IsExecutorAlive(execId))
+              } match {
+                case Success(v) if v == false =>
+                  throw new ExecutorDeadException(s"The relative remote executor(Id: $execId)," +
+                    " which maintains the block data to fetch is dead.")
+                case _ => throw e
+              }
+          }
+        }
+      }
 
-      int maxRetries = conf.maxIORetries();
+      val maxRetries = transportConf.maxIORetries()
       if (maxRetries > 0) {
         // Note this Fetcher will correctly handle maxRetries == 0; we avoid it just in case there's
         // a bug in this code. We should remove the if statement once we're sure of the stability.
-        new RetryingBlockFetcher(conf, blockFetchStarter, blockIds, listener).start();
+        new RetryingBlockFetcher(transportConf, blockFetchStarter, blockIds, listener).start()
       } else {
-        blockFetchStarter.createAndStart(blockIds, listener);
+        blockFetchStarter.createAndStart(blockIds, listener)
       }
-    } catch (Exception e) {
-      logger.error("Exception while beginning fetchBlocks", e);
-      for (String blockId : blockIds) {
-        listener.onBlockFetchFailure(blockId, e);
-      }
+    } catch {
+      case e: Exception =>
+        logError("Exception while beginning fetchBlocks", e)
+        blockIds.foreach(listener.onBlockFetchFailure(_, e))
     }
   }
 ```
@@ -205,3 +219,58 @@ ExternalShuffleService中的BlockStoreClient继承类为 ExternalBlockStoreClien
     });
   }
 ```
+
+#### RDD 之间Shuffle交换数据
+
+在Rdd由各种算子操作期间生成各种需要Shuffle交换数据的Shuffle RDD 类型， 例如：
+
+ - ShuffleRDD
+ - ShuffledRawRDD
+ - CoGroupedRDD
+ - SubtractedRDD
+ 
+这里不细说这些不同类型的需要Shuffle 数据RDD的使用场景，RDD的方法`compute()`会计算得到结果RDD，
+在上述这些RDD的`compute()`方法中，均调用`SparkEnv.get.shuffleManager.getReader()`方法，
+已知在当前的Spark版本中，Shuffle Manager的实现类只有一种`SortShuffleManager`,查看其`getReader()`
+方法, 这是在每个Executor的reduce task中被调用，生成一个reader去从前面的stage读取partition的数据
+```scala
+ /**
+   * Get a reader for a range of reduce partitions (startPartition to endPartition-1, inclusive).
+   * Called on executors by reduce tasks.
+   */
+  override def getReader[K, C](
+      handle: ShuffleHandle,
+      startPartition: Int,
+      endPartition: Int,
+      context: TaskContext,
+      metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
+    val blocksByAddress = SparkEnv.get.mapOutputTracker.getMapSizesByExecutorId(
+      handle.shuffleId, startPartition, endPartition)
+    new BlockStoreShuffleReader(
+      handle.asInstanceOf[BaseShuffleHandle[K, _, C]], blocksByAddress, context, metrics,
+      shouldBatchFetch = canUseBatchFetch(startPartition, endPartition, context))
+  }
+```
+`MapOutputTracker.getMapSizesByExecutorId()`方法会获得这一次的Shuffle需要的数据在map output阶段的对应信息
+生成`BlockStoreShuffleReader`对象，在`BlockStoreShuffleReader`的`read()`方法中，生成`ShuffleBlockFetcherIterator`对象，
+并将远程的数据Block转成Iterator对象，`CompletionIterator`，在map等相关集合操作中，有后台API自动调用`next()/hasNext()`等一些列继承的API
+在`ShuffleeBlockFetcherIterator`中，使用的shuffleClient是 `BlockManager.shuffleClient`,该对象在使用ExternalShuffleService时，
+是ExternalShuffleStoreClient，否则使用直接链接Executor获取数据的NettyBlockTransferService。两种client获取数据的方式基本一样，这里不作区分讨论
+```java
+  // Client to read other executors' blocks. This is either an external service, or just the
+  // standard BlockTransferService to directly connect to other Executors.
+  private[spark] val blockStoreClient = externalBlockStoreClient.getOrElse(blockTransferService)
+
+```
+
+在`ShuffleBlockFetcherIterator`中，获取数据的方式如下：
+
+ 1. 类初始化的时候调用initialize() 调用 fetchUpToMaxBytes(), 获取达到maxBytesInFlight大小的数据
+ 2. Iterator自动触发的next()方法，获取数据， 每一个循环里调用一次fetchUpToMaxBytes()获取一批数据
+ 3. 没有数据后，停止获取数据。
+ 
+获取数据的API调用链如下：
+```java
+fetchUpToMaxBytes() -> fetchUpToMaxBytes()#send() -> sendRequest() -> shuffleClient.fetchBlocks()
+```
+后面的实现逻辑同上述`fetchBlocks()`获取数据的实现，同时不过多赘述获取数据的控制逻辑。
