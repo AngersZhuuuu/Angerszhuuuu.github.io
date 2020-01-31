@@ -1,5 +1,5 @@
  
- # External Shuffle Service
+# External Shuffle Service
  
 Spark系统在运行含shuffle过程的应用时，Executor进程除了运行task，还要负责写shuffle 数据，给其他Executor提供shuffle数据。
 当Executor进程任务过重，导致GC而不能为其 他Executor提供shuffle数据时，会影响任务运行。
@@ -197,6 +197,7 @@ ExternalShuffleService为继承ExternalStoreClient的External Shuffle Service的
           // Immediately request all chunks -- we expect that the total size of the request is
           // reasonable due to higher level chunking in [[ShuffleBlockFetcherIterator]].
           // 根据协商的StreamId等信息，one by one的获取连续的有序的Chunk数据
+          // 当 downloadFileManager != null 的时候，使用stream的方式，否则使用fetchChunk的方式
           for (int i = 0; i < streamHandle.numChunks; i++) {
             if (downloadFileManager != null) {
               client.stream(OneForOneStreamManager.genStreamChunkId(streamHandle.streamId, i),
