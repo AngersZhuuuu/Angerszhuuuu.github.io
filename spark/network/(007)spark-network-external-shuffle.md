@@ -12,7 +12,15 @@ External Shuffle Service的类：
  * YarnShuffleService  服务于Yarn的NodeManager上
 
 
-以Yarn模式为例，介绍External Shuffle Service怎么交换数据
+以Yarn模式为例，介绍External Shuffle Service怎么交换数据,在之前需要理清的点：
+
+ 1. 未开启External Shuffle Service，获取数据块的服务类为NettyBlockRpcServer
+ 2. 开启External Shuffle Service 获取数据的服务类为 ExternalShuffleService(Standalone mode,运行在每个worker上)/
+ YarnShuffleService（yarn mode， 运行在每个NodeManager上）
+ 3. 未开启External Shuffle Service， Driver端数据的客户端为NettyBlockTransferService，Executor shuffle数据的客户端为NettyBlockTransferService
+ 4. 开启External Shuffle Service，Driver端数据的客户端为NettyBlockTransferService，Executor shuffle数据的客户端为ExternalBlockStoreClient
+ 
+ 
 
 ## ExternalBlockHandler
 
@@ -136,6 +144,7 @@ ExternalShuffleService为继承ExternalStoreClient的External Shuffle Service的
 旧的协议为`OpenBlocks`, 新的协议为`FetchShuffleBlocks`,这里不过多阐述其协议的区别，在ExternalBlockHandler中，针对这两种请求，
 请求成功的状态下均会返回对应的StreamId， 并在StreamManager中注册对应的数据流；
 
+#### ExternalShuffle Service 的 ExternalBlockHandler处理请求
 ```java
   protected void handleMessage(
       BlockTransferMessage msgObj,
@@ -171,6 +180,74 @@ ExternalShuffleService为继承ExternalStoreClient的External Shuffle Service的
        ··················
     } else {
       throw new UnsupportedOperationException("Unexpected message: " + msgObj);
+    }
+  }
+```
+
+#### 直连Executor获取数据服务类NettyBlockRpcServer
+
+```scala
+  override def receive(
+      client: TransportClient,
+      rpcMessage: ByteBuffer,
+      responseContext: RpcResponseCallback): Unit = {
+    val message = BlockTransferMessage.Decoder.fromByteBuffer(rpcMessage)
+    logTrace(s"Received request: $message")
+
+    message match {
+      case openBlocks: OpenBlocks =>
+        val blocksNum = openBlocks.blockIds.length
+        val blocks = (0 until blocksNum).map { i =>
+          val blockId = BlockId.apply(openBlocks.blockIds(i))
+          assert(!blockId.isInstanceOf[ShuffleBlockBatchId],
+            "Continuous shuffle block fetching only works for new fetch protocol.")
+          blockManager.getLocalBlockData(blockId)
+        }
+        val streamId = streamManager.registerStream(appId, blocks.iterator.asJava,
+          client.getChannel)
+        logTrace(s"Registered streamId $streamId with $blocksNum buffers")
+        responseContext.onSuccess(new StreamHandle(streamId, blocksNum).toByteBuffer)
+
+      case fetchShuffleBlocks: FetchShuffleBlocks =>
+        val blocks = fetchShuffleBlocks.mapIds.zipWithIndex.flatMap { case (mapId, index) =>
+          if (!fetchShuffleBlocks.batchFetchEnabled) {
+            fetchShuffleBlocks.reduceIds(index).map { reduceId =>
+              blockManager.getLocalBlockData(
+                ShuffleBlockId(fetchShuffleBlocks.shuffleId, mapId, reduceId))
+            }
+          } else {
+            val startAndEndId = fetchShuffleBlocks.reduceIds(index)
+            if (startAndEndId.length != 2) {
+              throw new IllegalStateException(s"Invalid shuffle fetch request when batch mode " +
+                s"is enabled: $fetchShuffleBlocks")
+            }
+            Array(blockManager.getLocalBlockData(
+              ShuffleBlockBatchId(
+                fetchShuffleBlocks.shuffleId, mapId, startAndEndId(0), startAndEndId(1))))
+          }
+        }
+
+        val numBlockIds = if (fetchShuffleBlocks.batchFetchEnabled) {
+          fetchShuffleBlocks.mapIds.length
+        } else {
+          fetchShuffleBlocks.reduceIds.map(_.length).sum
+        }
+
+        val streamId = streamManager.registerStream(appId, blocks.iterator.asJava,
+          client.getChannel)
+        logTrace(s"Registered streamId $streamId with $numBlockIds buffers")
+        responseContext.onSuccess(
+          new StreamHandle(streamId, numBlockIds).toByteBuffer)
+
+      case uploadBlock: UploadBlock =>
+        // StorageLevel and ClassTag are serialized as bytes using our JavaSerializer.
+        val (level, classTag) = deserializeMetadata(uploadBlock.metadata)
+        val data = new NioManagedBuffer(ByteBuffer.wrap(uploadBlock.blockData))
+        val blockId = BlockId(uploadBlock.blockId)
+        logDebug(s"Receiving replicated block $blockId with level ${level} " +
+          s"from ${client.getSocketAddress}")
+        blockManager.putBlockData(blockId, data, level, classTag)
+        responseContext.onSuccess(ByteBuffer.allocate(0))
     }
   }
 ```
@@ -275,3 +352,4 @@ ExternalShuffleService为继承ExternalStoreClient的External Shuffle Service的
 fetchUpToMaxBytes() -> fetchUpToMaxBytes()#send() -> sendRequest() -> shuffleClient.fetchBlocks()
 ```
 后面的实现逻辑同上述`fetchBlocks()`获取数据的实现，同时不过多赘述获取数据的控制逻辑。
+
