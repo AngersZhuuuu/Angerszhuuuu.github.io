@@ -1,4 +1,4 @@
-# AngersZhuuu的NoteBoot
+# AngersZhuuu的NoteBook
 
 
 # Spark
@@ -22,4 +22,4 @@
  ## [Calcite 定义理解](calcite/definition/class-definition.md)
  ## Calcite 物化视图实现理解
  ### [Calcite 拆分Filter过滤条件方法](calcite/tips/拆分过滤条件.md)
- ### [Calcite 获取表达式的合取析取范式](calcite/tips/获得表达式的合取范式和析取范式.md)
+ ### [Calcite 获取表达式的合取析取范式](calcite/tips/获取表达式的合取范式和析取范式.md)
